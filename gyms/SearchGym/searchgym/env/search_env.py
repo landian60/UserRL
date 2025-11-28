@@ -248,7 +248,7 @@ class SearchEnv(gym.Env):
             return "Search query is empty. Please provide a search query.", 0.0
         
         try:
-            # Perform search using serper API
+            # Perform search using DashScope API
             search_results = search_serper(query, num=self.config.max_search_results)
             
             # Store search in history

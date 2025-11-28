@@ -53,7 +53,14 @@ SGLANG_REQUIRES = [
     "tensordict<=0.6.2",
     "sglang[srt,openai]==0.4.7",
     "torch-memory-saver>=0.0.5",
-    "torch==2.6.0",
+    # Additional dependencies for sglang.srt that may not be auto-installed
+    "pyzmq",
+    "uvloop",
+    "fastapi",
+    "sentencepiece",
+    "compressed-tensors",
+    "msgspec",
+    "partial-json-parser",
 ]
 TRL_REQUIRES = ["trl<=0.9.6"]
 

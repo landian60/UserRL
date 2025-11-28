@@ -9,8 +9,9 @@ from pathlib import Path
 class SearchGymConfig:
     """Complete configuration for SearchGym environment."""
     
-    # Serper API configuration
-    serper_api_key: str = ""
+    # DashScope API configuration
+    dashscope_api_key: str = ""
+    serper_api_key: str = ""  # Deprecated, kept for backward compatibility
     api_key: str = ""
     
     # Environment configuration
@@ -43,7 +44,16 @@ class SearchGymConfig:
     data_source: Optional[Union[str, List[str]]] = None  # question IDs or None for random
     
     def __post_init__(self):
-        # Auto-load Serper API key from secret.json or environment if not provided
+        # Auto-load DashScope API key from secret.json or environment if not provided
+        if not self.dashscope_api_key:
+            self.dashscope_api_key = os.getenv("DASHSCOPE_API_KEY", "")
+            # Fallback to serper_api_key for backward compatibility
+            if not self.dashscope_api_key and self.serper_api_key:
+                self.dashscope_api_key = self.serper_api_key
+            elif not self.dashscope_api_key:
+                self.dashscope_api_key = os.getenv("SERPER_API_KEY", "")
+        
+        # Keep serper_api_key for backward compatibility
         if not self.serper_api_key:
             self.serper_api_key = os.getenv("SERPER_API_KEY", "")
 

@@ -105,7 +105,12 @@ class FSDPSGLangShardingManager(BaseShardingManager):
             params = {k: v.to(device, non_blocking=True) if fsdp_version(self.module) == 2 else v for k, v in params.items()}
             params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
             # Copy, not share memory
-            loop = asyncio.get_event_loop()
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                # Python 3.12+ compatibility: create new event loop if none exists
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
             loop.run_until_complete(self.update_weights(params))
             log_gpu_memory_usage("After sync model weights in sharding manager", logger=logger)
 
