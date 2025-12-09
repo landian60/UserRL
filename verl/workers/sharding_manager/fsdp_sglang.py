@@ -17,6 +17,7 @@
 import asyncio
 import logging
 import os
+from collections import OrderedDict
 
 import torch
 import torch.distributed as dist
@@ -41,6 +42,77 @@ from .base import BaseShardingManager
 # from vllm.distributed import parallel_state as sglang_ps
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _normalize_param_name_for_sglang(name: str) -> str:
+    """
+    Convert PEFT/FSDP parameter names to SGLang-compatible format.
+    
+    SGLang expects parameter names like: model.layers.0.self_attn.qkv_proj.weight
+    But PEFT/FSDP produces names like: base_model.model.model.layers.0.self_attn.qkv_proj.base_layer.weight
+    
+    This function removes all PEFT prefixes and suffixes to match SGLang's format.
+    """
+    # Remove PEFT prefixes (most specific first)
+    if "base_model.model.model." in name:
+        name = name.replace("base_model.model.model.", "model.")
+    elif "base_model.model." in name:
+        name = name.replace("base_model.model.", "model.")
+    elif name.startswith("base_model."):
+        name = name.replace("base_model.", "model.", 1)
+    
+    # Remove FSDP wrapper prefix
+    name = name.replace("_fsdp_wrapped_module.", "")
+    
+    # Remove .base_layer suffix from PEFT parameters (can appear anywhere in the path)
+    name = name.replace(".base_layer", "")
+    
+    # Ensure model. prefix for layer parameters (SGLang expects this)
+    if name.startswith("layers.") and not name.startswith("model."):
+        name = "model." + name
+    
+    return name
+
+
+def _is_peft_model(fsdp_module):
+    """Check if the module is a PEFT model."""
+    peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
+    return hasattr(peft_model, "peft_config")
+
+
+def _normalize_peft_param_names(params: OrderedDict) -> OrderedDict:
+    """
+    Normalize PEFT parameter names to SGLang-compatible format.
+    
+    Takes an existing state_dict and filters/renames parameters to remove
+    PEFT prefixes and suffixes, skipping LoRA-specific parameters.
+    
+    Args:
+        params: State dict with PEFT parameter names
+        
+    Returns:
+        OrderedDict: Parameters with SGLang-compatible names
+    """
+    normalized_params = OrderedDict()
+    
+    for name, param in params.items():
+        # Skip LoRA-specific parameters (lora_A, lora_B, etc.) and FSDP internal parameters
+        if any(x in name for x in ["lora_A", "lora_B", "lora_embedding", "_flat_param"]):
+            continue
+        
+        # Normalize parameter name: remove PEFT and FSDP prefixes
+        clean_name = _normalize_param_name_for_sglang(name)
+        
+        # Extract tensor (handle DTensor case)
+        if hasattr(param, "full_tensor"):
+            tensor = param.full_tensor().detach()
+        else:
+            tensor = param.detach() if isinstance(param, torch.Tensor) else param
+        
+        normalized_params[clean_name] = tensor
+    
+    logger.info(f"Normalized {len(normalized_params)} parameters from PEFT model for SGLang")
+    return normalized_params
 
 
 def _preprocess_tensor_for_update_weights(tensor: torch.Tensor):
@@ -99,11 +171,45 @@ class FSDPSGLangShardingManager(BaseShardingManager):
             log_gpu_memory_usage("Before state_dict() in sharding manager memory", logger=logger)
             if self.offload_param:
                 load_fsdp_model_to_gpu(self.module)
-            params = self.module.state_dict()
-            log_gpu_memory_usage("After state_dict() in sharding manager memory", logger=logger)
-            device = torch.cuda.current_device()  # used when fsdp2 set cpu_offload_policy
-            params = {k: v.to(device, non_blocking=True) if fsdp_version(self.module) == 2 else v for k, v in params.items()}
-            params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+            
+            # Check if this is a PEFT/LoRA model
+            is_peft = _is_peft_model(self.module)
+            
+            if is_peft:
+                # PEFT model: merge LoRA weights, get state_dict once, then unmerge
+                peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
+                
+                if fsdp_version(self.module) > 0:
+                    with FSDP.summon_full_params(self.module, writeback=False):
+                        # Temporarily merge LoRA weights into the base model
+                        peft_model.merge_adapter()
+                        
+                        # Get state_dict once - this contains merged weights with PEFT prefixes
+                        params = self.module.state_dict()
+                        
+                        # Unmerge immediately to restore original state
+                        peft_model.unmerge_adapter()
+                else:
+                    # Non-FSDP case
+                    peft_model.merge_adapter()
+                    params = self.module.state_dict()
+                    peft_model.unmerge_adapter()
+                
+                log_gpu_memory_usage("After state_dict() in sharding manager memory", logger=logger)
+                
+                # Normalize parameter names to SGLang-compatible format
+                device = torch.cuda.current_device()
+                params = {k: v.to(device, non_blocking=True) if fsdp_version(self.module) == 2 else v for k, v in params.items()}
+                params = _normalize_peft_param_names(params)
+                logger.info(f"Using merged PEFT parameters: {len(params)} params")
+            else:
+                # Regular model, use standard state_dict
+                params = self.module.state_dict()
+                log_gpu_memory_usage("After state_dict() in sharding manager memory", logger=logger)
+                device = torch.cuda.current_device()  # used when fsdp2 set cpu_offload_policy
+                params = {k: v.to(device, non_blocking=True) if fsdp_version(self.module) == 2 else v for k, v in params.items()}
+                params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+            
             # Copy, not share memory
             try:
                 loop = asyncio.get_event_loop()
@@ -189,10 +295,45 @@ class FSDPSGLangShardingManager(BaseShardingManager):
         log_gpu_memory_usage("Before state_dict() in sharding manager memory", logger=logger)
         if self.offload_param:
             load_fsdp_model_to_gpu(self.module)
-        params = self.module.state_dict()
-        log_gpu_memory_usage("After state_dict() in sharding manager memory", logger=logger)
-        device = torch.cuda.current_device()  # used when fsdp2 set cpu_offload_policy
-        params = {k: v.to(device, non_blocking=True) if fsdp_version(self.module) == 2 else v for k, v in params.items()}
+        
+        # Check if this is a PEFT/LoRA model
+        is_peft = _is_peft_model(self.module)
+        
+        if is_peft:
+            # PEFT model: merge LoRA weights, get state_dict once, then unmerge
+            peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
+            
+            if fsdp_version(self.module) > 0:
+                with FSDP.summon_full_params(self.module, writeback=False):
+                    # Temporarily merge LoRA weights into the base model
+                    peft_model.merge_adapter()
+                    
+                    # Get state_dict once - this contains merged weights with PEFT prefixes
+                    params = self.module.state_dict()
+                    
+                    # Unmerge immediately to restore original state
+                    peft_model.unmerge_adapter()
+            else:
+                # Non-FSDP case
+                peft_model.merge_adapter()
+                params = self.module.state_dict()
+                peft_model.unmerge_adapter()
+            
+            log_gpu_memory_usage("After state_dict() in sharding manager memory", logger=logger)
+            
+            # Normalize parameter names to SGLang-compatible format
+            device = torch.cuda.current_device()
+            params = {k: v.to(device, non_blocking=True) if fsdp_version(self.module) == 2 else v for k, v in params.items()}
+            params = _normalize_peft_param_names(params)
+            logger.info(f"Using merged PEFT parameters: {len(params)} params")
+        else:
+            # Regular model, use standard state_dict
+            params = self.module.state_dict()
+            log_gpu_memory_usage("After state_dict() in sharding manager memory", logger=logger)
+            device = torch.cuda.current_device()  # used when fsdp2 set cpu_offload_policy
+            params = {k: v.to(device, non_blocking=True) if fsdp_version(self.module) == 2 else v for k, v in params.items()}
+            params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+        
         # Copy, not share memory
         await self.update_weights(params)
         log_gpu_memory_usage("After sync model weights in sharding manager", logger=logger)

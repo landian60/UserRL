@@ -162,18 +162,25 @@ class AsyncvLLMServer(AsyncServerBase):
                 kwargs[k] = config.get(k)
         print(f"override_generation_config: {kwargs}")
 
+        # Only set disable_mm_preprocessor_cache for multimodal models
+        is_multimodal = config.get("limit_images", None) is not None
+        engine_args_kwargs = {
+            "model": local_path,
+            "enable_sleep_mode": True,
+            "override_generation_config": kwargs,
+            "tensor_parallel_size": tensor_parallel_size,
+            "distributed_executor_backend": ExternalRayDistributedExecutor if os.environ.get("VERL_VLLM_USE_RAY_BACKEND", "1") == "1" else None,
+            "dtype": config.dtype,
+            "enforce_eager": config.enforce_eager,
+            "gpu_memory_utilization": config.gpu_memory_utilization,
+            "disable_custom_all_reduce": True,
+            "skip_tokenizer_init": False,
+        }
+        if is_multimodal:
+            engine_args_kwargs["disable_mm_preprocessor_cache"] = True
+
         engine_args = AsyncEngineArgs(
-            model=local_path,
-            enable_sleep_mode=True,
-            override_generation_config=kwargs,
-            tensor_parallel_size=tensor_parallel_size,
-            distributed_executor_backend=ExternalRayDistributedExecutor if os.environ.get("VERL_VLLM_USE_RAY_BACKEND", "1") == "1" else None,
-            dtype=config.dtype,
-            enforce_eager=config.enforce_eager,
-            gpu_memory_utilization=config.gpu_memory_utilization,
-            disable_custom_all_reduce=True,
-            disable_mm_preprocessor_cache=True,
-            skip_tokenizer_init=False,
+            **engine_args_kwargs,
             max_model_len=max_model_len,
             load_format="auto",
             disable_log_stats=config.disable_log_stats,

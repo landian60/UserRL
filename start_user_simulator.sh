@@ -9,11 +9,13 @@ set -x
 
 # ==================== 环境配置 ====================
 # 指定使用GPU卡0
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=3
 
 # 模型路径
 # MODEL_PATH="/home/liuguanming/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B-Instruct-2507/snapshots/0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe"
-MODEL_PATH="/home/liuguanming/.cache/huggingface/hub/models--Qwen--Qwen3-14B/snapshots/8268fe3026cb304910457689366670e803a6fd56"
+# MODEL_PATH="/home/liuguanming/.cache/huggingface/hub/models--Qwen--Qwen3-14B/snapshots/8268fe3026cb304910457689366670e803a6fd56"
+MODEL_PATH="/vePFS-Mindverse/share/huggingface/hub/models--Qwen--Qwen3-30B-A3B-Instruct-2507/snapshots/0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe/"
+
 # 服务配置
 HOST="127.0.0.1"
 PORT=8000
@@ -47,8 +49,9 @@ python3 -m sglang.launch_server \
     --host "$HOST" \
     --port "$PORT" \
     --trust-remote-code \
-    --mem-fraction-static 0.5 \
-    --context-length 8192 \
-    --max-running-requests 64 \
-    --max-total-tokens 65536
+    --served-model-name "Qwen/Qwen3-30B-A3B-Instruct-2507" \
+    --mem-fraction-static 0.8 \
+    --context-length 24576 \
+    --max-running-requests 32 \
+    --max-total-tokens 196608
 
